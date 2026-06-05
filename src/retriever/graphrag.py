@@ -103,6 +103,9 @@ class GraphRAGRetriever:
 
         Returns:
             Raw list of result dicts from Neo4j.
+
+        Raises:
+            RuntimeError: If the generated Cypher fails to execute.
         """
         cypher = self.nl_to_cypher(natural_language_query)
         try:
@@ -111,7 +114,9 @@ class GraphRAGRetriever:
             return results
         except Exception as e:
             logger.error("Cypher execution failed: %s\nQuery was:\n%s", e, cypher)
-            return []
+            raise RuntimeError(
+                f"Generated Cypher query failed: {e}\nQuery: {cypher}"
+            ) from e
 
     def format_context_for_claude(self, results: list[dict[str, Any]]) -> str:
         """

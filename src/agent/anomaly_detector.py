@@ -92,8 +92,16 @@ class AnomalyDetector:
         try:
             rows = self.conn.run_query(cypher, params)
         except Exception as e:
-            logger.error("Anomaly pattern %s failed: %s", pattern_name, e)
-            rows = []
+            logger.error("Anomaly pattern %s failed: %s", pattern_name, e, exc_info=True)
+            return AnomalyFinding(
+                pattern_name=pattern_name,
+                severity=spec.severity,
+                description=spec.description,
+                cypher_used=spec.cypher.strip(),
+                evidence=[],
+                entity_ids=[],
+                error=f"Query failed: {e}",
+            )
 
         entity_ids = _extract_entity_ids(rows, pattern_name)
 

@@ -299,6 +299,8 @@ class Orchestrator:
 
         _named_regs = routing.get("regulations") or None  # None → check all
 
+        agent_errors: list[str] = []
+
         if needs_compliance and needs_investigation:
             with ThreadPoolExecutor(max_workers=2) as executor:
                 futures = {
@@ -318,20 +320,23 @@ class Orchestrator:
                             investigation_result = result
                             logger.info("[%s] Investigation complete", session_id)
                     except Exception as e:
-                        logger.error("[%s] %s agent failed: %s", session_id, label, e)
+                        logger.error("[%s] %s agent failed: %s", session_id, label, e, exc_info=True)
+                        agent_errors.append(f"{label} agent failed: {e}")
         else:
             if needs_compliance:
                 try:
                     compliance_result = self._compliance_agent.run(question, _named_regs)
                     logger.info("[%s] Compliance verdict: %s", session_id, compliance_result.verdict)
                 except Exception as e:
-                    logger.error("[%s] ComplianceAgent failed: %s", session_id, e)
+                    logger.error("[%s] ComplianceAgent failed: %s", session_id, e, exc_info=True)
+                    agent_errors.append(f"compliance agent failed: {e}")
             if needs_investigation:
                 try:
                     investigation_result = self._investigation_agent.run(question)
                     logger.info("[%s] Investigation complete", session_id)
                 except Exception as e:
-                    logger.error("[%s] InvestigationAgent failed: %s", session_id, e)
+                    logger.error("[%s] InvestigationAgent failed: %s", session_id, e, exc_info=True)
+                    agent_errors.append(f"investigation agent failed: {e}")
 
         # Step 3: Synthesise
         response = self._synthesise(
@@ -341,6 +346,7 @@ class Orchestrator:
             compliance_result=compliance_result,
             investigation_result=investigation_result,
             stream_callback=stream_callback,
+            agent_errors=agent_errors,
         )
         return response
 
@@ -360,7 +366,7 @@ class Orchestrator:
             logger.info("Graph regulations found: %s", ids)
             return ids
         except Exception as e:
-            logger.warning("Could not fetch regulation IDs from graph: %s", e)
+            logger.error("Could not fetch regulation IDs from graph: %s", e, exc_info=True)
             return []
 
     def _fetch_assessment_findings(
@@ -418,7 +424,7 @@ class Orchestrator:
             return findings, best_verdict, avg_confidence
 
         except Exception as e:
-            logger.warning("Could not fetch assessment findings from graph: %s", e)
+            logger.error("Could not fetch assessment findings from graph: %s", e, exc_info=True)
             return [], "INFORMATIONAL", 0.5
 
     def _route(self, question: str) -> dict:
@@ -456,6 +462,7 @@ class Orchestrator:
         compliance_result: Any | None,
         investigation_result: Any | None,
         stream_callback=None,
+        agent_errors: list[str] | None = None,
     ) -> InvestigationResponse:
         """Merge specialist outputs into a single InvestigationResponse."""
 
@@ -647,11 +654,21 @@ class Orchestrator:
             if _tid:
                 _f["pattern_name"] = THRESHOLD_TO_PATTERN.get(_tid)
 
+        if agent_errors:
+            context_parts.append(
+                "AGENT ERRORS (inform the user that some analysis could not be completed):\n"
+                + "\n".join(f"  - {err}" for err in agent_errors)
+                + "\n"
+            )
+
         if not compliance_result and not investigation_result:
+            error_detail = ""
+            if agent_errors:
+                error_detail = " Errors: " + "; ".join(agent_errors)
             return InvestigationResponse(
                 session_id=session_id,
                 question=question,
-                answer="Unable to process the question. Please try again with a specific entity ID.",
+                answer=f"Unable to process the question.{error_detail} Please try again with a specific entity ID.",
                 verdict="INFORMATIONAL",
                 routing=routing,
             )
