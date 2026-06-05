@@ -14,19 +14,21 @@ Model: MODEL_MAIN  temperature=TEMPERATURE  (see src/agent/config.py)
 from __future__ import annotations
 
 import copy
-import json
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, TYPE_CHECKING
 
-from src.agent._security import guard_tool_result
 from src.agent.config import (
     MODEL, MAX_TOKENS, make_anthropic_client,
     COMPLIANCE_MAX_ITERATIONS, COMPLIANCE_MAX_HISTORY_PAIRS,
     CACHE_CONTROL_EPHEMERAL, TEMPERATURE, PRE_RUN_RESULT_CHAR_LIMIT,
 )
-from src.agent.utils import call_claude_with_retry, clean_markdown, extract_text, extract_field, trim_message_history, truncate_tool_result, ENTITY_ID_RE
+from src.agent.utils import (
+    call_claude_with_retry, clean_markdown, extract_text, extract_field,
+    trim_message_history, parse_entity_from_question,
+    process_tool_result, build_tool_result_message, blocks_to_dicts,
+)
 from src.mcp.schema import GRAPH_SCHEMA_HINT, ComplianceResult
 
 if TYPE_CHECKING:
@@ -172,13 +174,7 @@ class ComplianceAgent:
         # Pre-run traverse_compliance_path to eliminate the first Claude round-trip.
         # The compliance agent ALWAYS calls traverse first — injecting the result
         # upfront saves one full API call (~4-6s) by skipping iter-1 entirely.
-        _PREFIX_TO_TYPE = {
-            "LOAN": "LoanApplication", "BRW": "Borrower",
-            "ACC": "BankAccount",      "TXN": "Transaction",
-        }
-        _entity_match = ENTITY_ID_RE.search(question)
-        pre_entity_id   = _entity_match.group(0).upper() if _entity_match else ""
-        pre_entity_type = _PREFIX_TO_TYPE.get(pre_entity_id.split("-")[0], "")
+        pre_entity_id, pre_entity_type = parse_entity_from_question(question)
 
         messages: list[dict] = [{"role": "user", "content": question}]
         regs_to_check: list[str] = []  # populated below; visible to the agent loop
@@ -206,10 +202,9 @@ class ComplianceAgent:
                     ordered_results.append((futures[future], future.result()))
 
             for idx, (reg_id, traverse_result) in enumerate(ordered_results):
-                traverse_content = truncate_tool_result(
-                    json.dumps(traverse_result, default=str), limit=PRE_RUN_RESULT_CHAR_LIMIT
+                traverse_content = process_tool_result(
+                    traverse_result, "traverse_compliance_path", limit=PRE_RUN_RESULT_CHAR_LIMIT
                 )
-                traverse_content = guard_tool_result(traverse_content, "traverse_compliance_path")
                 self._extract_evidence_ids(
                     "traverse_compliance_path", traverse_result,
                     seen_section_ids, seen_chunk_ids, seen_chunk_scores,
@@ -258,7 +253,7 @@ class ComplianceAgent:
                 break
 
             if response.stop_reason == "tool_use":
-                messages.append({"role": "assistant", "content": self._blocks_to_dicts(response.content)})
+                messages.append({"role": "assistant", "content": blocks_to_dicts(response.content)})
                 tool_blocks = [b for b in response.content if b.type == "tool_use"]
 
                 # Build resolved tool inputs before dispatch (persist_assessment needs score injection)
@@ -286,8 +281,8 @@ class ComplianceAgent:
                         ex.submit(self.execute_tool, blk.name, inp): blk.id
                         for blk, inp in resolved
                     }
-                    for future in as_completed(future_to_id):
-                        results_map[future_to_id[future]] = future.result()
+                    for fut in as_completed(future_to_id):
+                        results_map[future_to_id[fut]] = fut.result()
 
                 tool_results = []
                 for block, _ in resolved:
@@ -301,13 +296,8 @@ class ComplianceAgent:
                                 assessment_ids.append(aid)
                         persisted_findings.extend(result.get("findings", []))
                     self._extract_evidence_ids(block.name, result, seen_section_ids, seen_chunk_ids, seen_chunk_scores)
-                    content = truncate_tool_result(json.dumps(result, default=str))
-                    content = guard_tool_result(content, block.name)
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": content,
-                    })
+                    content = process_tool_result(result, block.name)
+                    tool_results.append(build_tool_result_message(block.id, content))
 
                 # Always append tool results so Claude can continue with remaining
                 # regulations when more than one is expected.
@@ -375,25 +365,6 @@ class ComplianceAgent:
                     seen_section_ids.add(row["section_id"])
                 if row.get("chunk_id"):
                     seen_chunk_ids.add(row["chunk_id"])
-
-    @staticmethod
-    def _blocks_to_dicts(content) -> list[dict]:
-        """Convert Anthropic SDK content blocks to plain dicts for stable serialisation."""
-        result = []
-        for block in content:
-            if isinstance(block, dict):
-                result.append(block)
-            elif block.type == "text":
-                result.append({"type": "text", "text": block.text})
-            elif block.type == "tool_use":
-                result.append({
-                    "type": "tool_use",
-                    "id": block.id,
-                    "name": block.name,
-                    "input": block.input,
-                })
-            # skip any other block types (e.g. thinking) silently
-        return result
 
     @staticmethod
     def _parse_result(text: str, cypher_used: list[str]) -> ComplianceResult:

@@ -2,18 +2,28 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 import anthropic
 
+from src.agent._security import guard_tool_result
 from src.agent.config import MAX_RETRY_SECONDS, TOOL_RESULT_CHAR_LIMIT
 
 logger = logging.getLogger(__name__)
 
 ENTITY_ID_RE = re.compile(r"(BRW|LOAN|ACC|TXN)-\d+", re.IGNORECASE)
+
+ENTITY_PREFIX_TO_TYPE: dict[str, str] = {
+    "LOAN": "LoanApplication",
+    "BRW": "Borrower",
+    "ACC": "BankAccount",
+    "TXN": "Transaction",
+}
 
 
 def clean_markdown(s: str) -> str:
@@ -105,3 +115,94 @@ def trim_message_history(
     if trimmed[0].get("role") == "user":
         trimmed = trimmed[1:]
     return anchor + trimmed
+
+
+# ---------------------------------------------------------------------------
+# Entity parsing
+# ---------------------------------------------------------------------------
+
+
+def parse_entity_from_question(question: str) -> tuple[str, str]:
+    """Extract the first entity ID and its type from a natural-language question.
+
+    Returns (entity_id, entity_type) — both empty strings when no ID is found.
+    """
+    match = ENTITY_ID_RE.search(question)
+    if not match:
+        return "", ""
+    entity_id = match.group(0).upper()
+    prefix = entity_id.split("-")[0]
+    entity_type = ENTITY_PREFIX_TO_TYPE.get(prefix, "")
+    return entity_id, entity_type
+
+
+# ---------------------------------------------------------------------------
+# Parallel tool execution
+# ---------------------------------------------------------------------------
+
+
+def execute_tools_parallel(
+    execute_tool_fn: Any,
+    tool_blocks: list,
+) -> dict[str, dict]:
+    """Execute tool-use blocks in parallel and return {block.id: result}.
+
+    Each entry in *tool_blocks* must expose `.id`, `.name`, and `.input`
+    (i.e. Anthropic SDK ``ToolUseBlock`` objects or compatible dicts).
+    """
+    results_map: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=max(1, len(tool_blocks))) as ex:
+        future_to_id = {
+            ex.submit(execute_tool_fn, blk.name, blk.input): blk.id
+            for blk in tool_blocks
+        }
+        for future in as_completed(future_to_id):
+            results_map[future_to_id[future]] = future.result()
+    return results_map
+
+
+# ---------------------------------------------------------------------------
+# Tool result processing
+# ---------------------------------------------------------------------------
+
+
+def process_tool_result(
+    result: dict,
+    tool_name: str,
+    limit: int = TOOL_RESULT_CHAR_LIMIT,
+) -> str:
+    """Serialise, truncate, and apply security framing to a tool result."""
+    content = truncate_tool_result(json.dumps(result, default=str), limit)
+    return guard_tool_result(content, tool_name)
+
+
+def build_tool_result_message(tool_use_id: str, content: str) -> dict:
+    """Build a single ``tool_result`` content block for the messages list."""
+    return {
+        "type": "tool_result",
+        "tool_use_id": tool_use_id,
+        "content": content,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Anthropic content-block helpers
+# ---------------------------------------------------------------------------
+
+
+def blocks_to_dicts(content: Any) -> list[dict]:
+    """Convert Anthropic SDK content blocks to plain dicts for stable serialisation."""
+    result = []
+    for block in content:
+        if isinstance(block, dict):
+            result.append(block)
+        elif block.type == "text":
+            result.append({"type": "text", "text": block.text})
+        elif block.type == "tool_use":
+            result.append({
+                "type": "tool_use",
+                "id": block.id,
+                "name": block.name,
+                "input": block.input,
+            })
+    return result
