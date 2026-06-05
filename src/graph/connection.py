@@ -57,7 +57,9 @@ class Neo4jConnection:
                 auth=(self._username, self._password),
             )
             self._driver.verify_connectivity()
-            logger.info("Connected to Neo4j at %s", self._uri)
+            # Log only the host portion of the URI to avoid leaking credentials
+            _safe_uri = self._uri.split("@")[-1] if "@" in self._uri else self._uri
+            logger.info("Connected to Neo4j at %s", _safe_uri)
         except AuthError as e:
             raise RuntimeError(f"Neo4j authentication failed: {e}") from e
         except ServiceUnavailable as e:

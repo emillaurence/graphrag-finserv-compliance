@@ -535,6 +535,9 @@ def _wrap_text(text: str, width: int = 60) -> str:
     return "<br>".join(lines)
 
 
+_VALID_ENTITY_TYPES: frozenset[str] = frozenset({"LoanApplication", "Borrower"})
+
+
 @st.cache_data(ttl=300)
 def _fetch_finding_subgraph(
     entity_id: str,
@@ -545,11 +548,14 @@ def _fetch_finding_subgraph(
     """Fetch Layer 1 entity neighbourhood + Layer 2 regulatory chain from Neo4j."""
     if not entity_id:
         return {"l1_nodes": [], "l1_edges": [], "l2_nodes": [], "l2_edges": []}
+    if entity_type not in _VALID_ENTITY_TYPES:
+        return {"l1_nodes": [], "l1_edges": [], "l2_nodes": [], "l2_edges": []}
 
     conn = _get_connection()
 
     # ── Layer 1: entity + direct neighbours ──────────────────────────────────
     id_prop = "loan_id" if entity_type == "LoanApplication" else "borrower_id"
+    # entity_type and id_prop are validated against a whitelist above, safe to interpolate
     l1_rows = conn.run_query(
         f"""
         MATCH (e:{entity_type} {{{id_prop}: $eid}})

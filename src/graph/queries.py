@@ -499,6 +499,9 @@ def get_assessment_with_evidence(
     }
 
 
+_ALLOWED_ENTITY_TYPES: frozenset[str] = frozenset({"LoanApplication", "Borrower"})
+
+
 def merge_assessment(
     conn: "Neo4jConnection",
     assessment_id: str,
@@ -511,7 +514,10 @@ def merge_assessment(
     created_at: str,
 ) -> None:
     """Create or update an Assessment node (idempotent)."""
+    if entity_type not in _ALLOWED_ENTITY_TYPES:
+        raise ValueError(f"Invalid entity_type '{entity_type}'. Must be one of {sorted(_ALLOWED_ENTITY_TYPES)}.")
     id_prop = "loan_id" if entity_type == "LoanApplication" else "borrower_id"
+    # entity_type and id_prop are validated against a whitelist above, safe to interpolate
     conn.run_query(
         f"""
         MERGE (a:Assessment {{assessment_id: $aid}})

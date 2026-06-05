@@ -14,9 +14,10 @@ Typical use:
 from __future__ import annotations
 import json
 import logging
+import re
 from typing import Any, TYPE_CHECKING
 
-from src.agent.config import MODEL_FAST, ROUTING_MAX_TOKENS, TEMPERATURE, make_anthropic_client
+from src.agent.config import MODEL_FAST, ROUTING_MAX_TOKENS, TEMPERATURE, WRITE_KEYWORDS, make_anthropic_client
 
 if TYPE_CHECKING:
     from src.graph.connection import Neo4jConnection
@@ -105,6 +106,11 @@ class GraphRAGRetriever:
             Raw list of result dicts from Neo4j.
         """
         cypher = self.nl_to_cypher(natural_language_query)
+        # Guard: reject LLM-generated Cypher that contains write operations
+        query_words = set(re.findall(r"\b[A-Z]+\b", cypher.upper()))
+        if query_words & WRITE_KEYWORDS:
+            logger.warning("LLM generated write Cypher — blocked: %s", cypher[:200])
+            return []
         try:
             results = self.conn.run_query(cypher)
             logger.info("Retrieved %d records from Neo4j.", len(results))

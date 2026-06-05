@@ -87,6 +87,11 @@ def make_execute_tool(conn: "Neo4jConnection") -> Callable[[str, dict], Any]:
             elif tool_name == "write-neo4j-cypher":
                 query  = tool_input.get("query", "")
                 params = tool_input.get("params", {})
+                # Block destructive operations — only MERGE/CREATE/SET are permitted
+                _DESTRUCTIVE_KEYWORDS: frozenset[str] = frozenset({"DELETE", "DETACH", "REMOVE", "DROP"})
+                query_words = set(re.findall(r"\b[A-Z]+\b", query.upper()))
+                if query_words & _DESTRUCTIVE_KEYWORDS:
+                    return {"error": "write-neo4j-cypher does not allow destructive operations (DELETE, DETACH, REMOVE, DROP)."}
                 return {"rows": conn.run_query(query, params)}
 
             # ── FastMCP ──────────────────────────────────────────────────────
