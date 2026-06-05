@@ -216,17 +216,9 @@ def persist_assessment(
 
         # Build finding rows for batch insert
         finding_rows: list[dict] = []
-        persisted_findings: list[dict] = []
         for i, f in enumerate(findings or []):
             fid = f"FIND-{assessment_id}-{i:03d}"
             finding_rows.append({
-                "finding_id": fid,
-                "finding_type": f.get("finding_type", "information"),
-                "severity": f.get("severity", "INFO"),
-                "description": f.get("description", ""),
-                "pattern_name": f.get("pattern_name"),
-            })
-            persisted_findings.append({
                 "finding_id": fid,
                 "finding_type": f.get("finding_type", "information"),
                 "severity": f.get("severity", "INFO"),
@@ -254,7 +246,7 @@ def persist_assessment(
 
         return {
             "assessment_id": assessment_id,
-            "findings": persisted_findings,
+            "findings": finding_rows,
             "step_ids": step_ids,
         }
     finally:

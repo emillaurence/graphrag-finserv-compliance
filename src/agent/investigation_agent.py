@@ -14,19 +14,21 @@ Model: MODEL_MAIN  temperature=TEMPERATURE  (see src/agent/config.py)
 
 from __future__ import annotations
 
-import json
 import logging
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
-from src.agent._security import guard_tool_result
 from src.agent.config import (
     MODEL, MAX_TOKENS, make_anthropic_client,
     INVESTIGATION_MAX_ITERATIONS, INVESTIGATION_MAX_HISTORY_PAIRS,
     CACHE_CONTROL_EPHEMERAL, TEMPERATURE, PRE_RUN_RESULT_CHAR_LIMIT,
 )
-from src.agent.utils import call_claude_with_retry, clean_markdown, extract_text, trim_message_history, truncate_tool_result, ENTITY_ID_RE
+from src.agent.utils import (
+    call_claude_with_retry, clean_markdown, extract_text,
+    trim_message_history,
+    parse_entity_from_question, execute_tools_parallel,
+    process_tool_result, build_tool_result_message,
+)
 from src.mcp.schema import ANOMALY_REGISTRY, ENTITY_TO_PATTERNS, GRAPH_SCHEMA_HINT, PATTERN_HINTS, InvestigationResult
 
 logger = logging.getLogger(__name__)
@@ -154,8 +156,7 @@ class InvestigationAgent:
         """
         # Pre-execute anomaly detection so results are guaranteed in context.
         # Select only patterns applicable to the entity type (e.g. LOAN → high_lvr_loans only).
-        entity_match = ENTITY_ID_RE.search(question)
-        pre_entity_id = entity_match.group(0).upper() if entity_match else ""
+        pre_entity_id, _ = parse_entity_from_question(question)
         prefix = pre_entity_id.split("-")[0] if pre_entity_id else ""
         relevant_patterns = ENTITY_TO_PATTERNS.get(prefix, list(ANOMALY_REGISTRY.keys()))
 
@@ -168,10 +169,9 @@ class InvestigationAgent:
             r for r in (anomaly_result.get("results") or [])
             if r.get("finding_count", 0) > 0
         ]
-        anomaly_content = truncate_tool_result(
-            json.dumps(anomaly_result, default=str), limit=PRE_RUN_RESULT_CHAR_LIMIT
+        anomaly_content = process_tool_result(
+            anomaly_result, "detect_graph_anomalies", limit=PRE_RUN_RESULT_CHAR_LIMIT
         )
-        anomaly_content = guard_tool_result(anomaly_content, "detect_graph_anomalies")
 
         messages: list[dict] = [
             {"role": "user", "content": question},
@@ -220,26 +220,14 @@ class InvestigationAgent:
                         cypher_used.append(block.input["query"])
 
                 # Execute all tool calls for this iteration in parallel
-                results_map: dict[str, dict] = {}
-                with ThreadPoolExecutor(max_workers=max(1, len(tool_blocks))) as ex:
-                    future_to_id = {
-                        ex.submit(self.execute_tool, blk.name, blk.input): blk.id
-                        for blk in tool_blocks
-                    }
-                    for future in as_completed(future_to_id):
-                        results_map[future_to_id[future]] = future.result()
+                results_map = execute_tools_parallel(self.execute_tool, tool_blocks)
 
                 tool_results = []
                 for block in tool_blocks:
                     result = results_map[block.id]
                     logger.info("Tool: %s(%s)", block.name, list(block.input.keys()))
-                    content = truncate_tool_result(json.dumps(result, default=str))
-                    content = guard_tool_result(content, block.name)
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": content,
-                    })
+                    content = process_tool_result(result, block.name)
+                    tool_results.append(build_tool_result_message(block.id, content))
                 messages.append({"role": "user", "content": tool_results})
 
                 messages = trim_message_history(messages, INVESTIGATION_MAX_HISTORY_PAIRS)
