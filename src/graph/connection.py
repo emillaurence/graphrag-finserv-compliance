@@ -97,6 +97,8 @@ class Neo4jConnection:
                     self.connect()
                 else:
                     raise
+        # Unreachable: the loop always returns or raises on the final attempt.
+        raise RuntimeError("Query failed after all retry attempts")
 
     # ------------------------------------------------------------------
     # Context manager support

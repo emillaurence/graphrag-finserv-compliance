@@ -152,8 +152,17 @@ def detect_graph_anomalies(
             try:
                 rows = _conn.run_query(cypher, params)
             except Exception as e:
-                logger.error("Anomaly pattern %s failed: %s", pattern_name, e)
-                rows = []
+                logger.error("Anomaly pattern %s failed: %s", pattern_name, e, exc_info=True)
+                results.append({
+                    "pattern_name":  pattern_name,
+                    "severity":      spec.severity,
+                    "description":   spec.description,
+                    "finding_count": 0,
+                    "findings":      [],
+                    "entity_ids":    [],
+                    "error":         f"Query failed: {e}",
+                })
+                continue
 
             entity_ids = [str(r[spec.id_key]) for r in rows if r.get(spec.id_key) is not None]
             results.append({

@@ -80,7 +80,7 @@ class TestRetrieve:
         assert len(results) == 2
         assert results[0]["account_id"] == "LA-001"
 
-    def test_returns_empty_list_on_neo4j_error(self, mock_neo4j_conn, mock_anthropic_client):
+    def test_raises_runtime_error_on_neo4j_error(self, mock_neo4j_conn, mock_anthropic_client):
         cypher_block = MagicMock()
         cypher_block.text = "MATCH (n) RETURN n"
         mock_anthropic_client.messages.create.return_value = MagicMock(content=[cypher_block])
@@ -88,9 +88,8 @@ class TestRetrieve:
         mock_neo4j_conn.run_query.side_effect = Exception("Connection error")
 
         retriever = GraphRAGRetriever(neo4j_conn=mock_neo4j_conn)
-        results = retriever.retrieve("Show me data")
-
-        assert results == []
+        with pytest.raises(RuntimeError, match="Generated Cypher query failed"):
+            retriever.retrieve("Show me data")
 
 
 # ---------------------------------------------------------------------------

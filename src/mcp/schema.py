@@ -535,9 +535,10 @@ class AnomalyFinding:
     cypher_used: str
     evidence: list[dict] = field(default_factory=list)
     entity_ids: list[str] = field(default_factory=list)
+    error: str | None = None
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "pattern_name": self.pattern_name,
             "severity": self.severity,
             "description": self.description,
@@ -545,6 +546,9 @@ class AnomalyFinding:
             "evidence": self.evidence,
             "entity_ids": self.entity_ids,
         }
+        if self.error is not None:
+            d["error"] = self.error
+        return d
 
 
 @dataclass
